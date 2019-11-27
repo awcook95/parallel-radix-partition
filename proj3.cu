@@ -2,9 +2,6 @@
 #include <stdio.h>
 #include <math.h>
 
-//include that was used in the cuda sample code
-#include <cuda_runtime.h>
-
 #define RAND_RANGE(N) ((double)rand()/((double)RAND_MAX + 1)*(N))
 
 //data generator
@@ -74,7 +71,7 @@ __global__ void prefixScan(int* d_histogram, int* sum, int size)
 }
 
 //Cuda sample code - step 1 of exclusive parallel scan
-__global__ void shfl_scan(int *data, int width, int *partial_sums=NULL)
+__global__ void shfl_scan_test(int *data, int width, int *partial_sums=NULL)
 {
     extern __shared__ int sums[];
     int id = ((blockIdx.x * blockDim.x) + threadIdx.x);
@@ -93,12 +90,11 @@ __global__ void shfl_scan(int *data, int width, int *partial_sums=NULL)
     // those threads where the thread 'i' away would have
     // been out of bounds of the warp are unaffected.  This
     // creates the scan sum.
+#pragma unroll
 
-    #pragma unroll
     for (int i=1; i<=width; i*=2)
     {
-        unsigned int mask = 0xffffffff;
-        int n = __shfl_up_sync(mask, value, i, width);
+        int n = __shfl_up(value, i, width);
 
         if (lane_id >= i) value += n;
     }
@@ -122,10 +118,9 @@ __global__ void shfl_scan(int *data, int width, int *partial_sums=NULL)
     {
         int warp_sum = sums[lane_id];
 
-        int mask = (1 << (blockDim.x / warpSize)) - 1;
-        for (int i=1; i<=(blockDim.x / warpSize); i*=2)
+        for (int i=1; i<=width; i*=2)
         {
-            int n = __shfl_up_sync(mask, warp_sum, i, (blockDim.x / warpSize));
+            int n = __shfl_up(warp_sum, i, width);
 
             if (lane_id >= i) warp_sum += n;
         }
@@ -173,15 +168,16 @@ __global__ void uniform_add(int *data, int *partial_sums, int len)
     data[id] += buf;
 }
 
-
-
-
-
-
 //define the reorder kernel here
-__global__ void Reorder()
+__global__ void Reorder(int* d_data, int* d_output, int* sum, int tagLength, int size)
 {
+    int T = blockIdx.x * blockDim.x + threadIdx.x;
 
+    if(T < size){
+        int h = bfe(d_data[T], 0, tagLength); //extract bits from input data
+        int offset = atomicAdd(&(sum[h]), 1); //calculate offset
+        d_output[offset] = d_data[T]; //use the offset to place input data into correct partition
+    }
 }
 
 bool isPowerOfTwo(unsigned long x)
