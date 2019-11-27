@@ -2,6 +2,9 @@
 #include <stdio.h>
 #include <math.h>
 
+//include that was used in the cuda sample code
+#include <cuda_runtime.h>
+
 #define RAND_RANGE(N) ((double)rand()/((double)RAND_MAX + 1)*(N))
 
 //data generator
@@ -69,6 +72,111 @@ __global__ void prefixScan(int* d_histogram, int* sum, int size)
 {
 
 }
+
+//Cuda sample code - step 1 of exclusive parallel scan
+__global__ void shfl_scan(int *data, int width, int *partial_sums=NULL)
+{
+    extern __shared__ int sums[];
+    int id = ((blockIdx.x * blockDim.x) + threadIdx.x);
+    int lane_id = id % warpSize;
+    // determine a warp_id within a block
+    int warp_id = threadIdx.x / warpSize;
+
+    // Below is the basic structure of using a shfl instruction
+    // for a scan.
+    // Record "value" as a variable - we accumulate it along the way
+    int value = data[id];
+
+    // Now accumulate in log steps up the chain
+    // compute sums, with another thread's value who is
+    // distance delta away (i).  Note
+    // those threads where the thread 'i' away would have
+    // been out of bounds of the warp are unaffected.  This
+    // creates the scan sum.
+
+    #pragma unroll
+    for (int i=1; i<=width; i*=2)
+    {
+        unsigned int mask = 0xffffffff;
+        int n = __shfl_up_sync(mask, value, i, width);
+
+        if (lane_id >= i) value += n;
+    }
+
+    // value now holds the scan value for the individual thread
+    // next sum the largest values for each warp
+
+    // write the sum of the warp to smem
+    if (threadIdx.x % warpSize == warpSize-1)
+    {
+        sums[warp_id] = value;
+    }
+
+    __syncthreads();
+
+    //
+    // scan sum the warp sums
+    // the same shfl scan operation, but performed on warp sums
+    //
+    if (warp_id == 0 && lane_id < (blockDim.x / warpSize))
+    {
+        int warp_sum = sums[lane_id];
+
+        int mask = (1 << (blockDim.x / warpSize)) - 1;
+        for (int i=1; i<=(blockDim.x / warpSize); i*=2)
+        {
+            int n = __shfl_up_sync(mask, warp_sum, i, (blockDim.x / warpSize));
+
+            if (lane_id >= i) warp_sum += n;
+        }
+
+        sums[lane_id] = warp_sum;
+    }
+
+    __syncthreads();
+
+    // perform a uniform add across warps in the block
+    // read neighbouring warp's sum and add it to threads value
+    int blockSum = 0;
+
+    if (warp_id > 0)
+    {
+        blockSum = sums[warp_id-1];
+    }
+
+    value += blockSum;
+
+    // Now write out our result
+    data[id] = value;
+
+    // last thread has sum, write write out the block's sum
+    if (partial_sums != NULL && threadIdx.x == blockDim.x-1)
+    {
+        partial_sums[blockIdx.x] = value;
+    }
+}
+
+//Cuda sample code - step 2 of exclusive parallel scan
+__global__ void uniform_add(int *data, int *partial_sums, int len)
+{
+    __shared__ int buf;
+    int id = ((blockIdx.x * blockDim.x) + threadIdx.x);
+
+    if (id > len) return;
+
+    if (threadIdx.x == 0)
+    {
+        buf = partial_sums[blockIdx.x];
+    }
+
+    __syncthreads();
+    data[id] += buf;
+}
+
+
+
+
+
 
 //define the reorder kernel here
 __global__ void Reorder()
