@@ -1,5 +1,5 @@
 #include <stdio.h>
-#define DSIZE 512
+#define DSIZE 64
 #define cudaCheckErrors(msg) \
     do { \
         cudaError_t __err = cudaGetLastError(); \
@@ -15,14 +15,14 @@
 
 typedef int mytype;
 
-template <typename T>
-__global__ void prescan(T *g_odata, T *g_idata, int n)
+__global__ void prescan(int *g_odata, int *g_idata, int n)
 {
-  extern __shared__ T temp[];  // allocated on invocation
+  extern __shared__ int temp[];  // allocated on invocation
   int thid = threadIdx.x;
   int offset = 1;
   temp[2*thid] = g_idata[2*thid]; // load input into shared memory
   temp[2*thid+1] = g_idata[2*thid+1];
+
   for (int d = n>>1; d > 0; d >>= 1)                    // build sum in place up the tree
   {
     __syncthreads();
@@ -43,7 +43,7 @@ __global__ void prescan(T *g_odata, T *g_idata, int n)
       {
          int ai = offset*(2*thid+1)-1;
          int bi = offset*(2*thid+2)-1;
-         T t = temp[ai];
+         int t = temp[ai];
          temp[ai] = temp[bi];
          temp[bi] += t;
       }
@@ -55,28 +55,37 @@ __global__ void prescan(T *g_odata, T *g_idata, int n)
 
 int main(){
 
-  mytype *h_i, *d_i, *h_o, *d_o;
-  int dszp = (DSIZE)*sizeof(mytype);
+    //input and output data arrays
+    int *h_i, *d_i, *h_o, *d_o;
+    int dszp = (DSIZE)*sizeof(mytype);
 
-  h_i = (mytype *)malloc(dszp);
-  h_o = (mytype *)malloc(dszp);
-  if ((h_i == NULL) || (h_o == NULL)) {printf("malloc fail\n"); return 1;}
-  cudaMalloc(&d_i, dszp);
-  cudaMalloc(&d_o, dszp);
-  cudaCheckErrors("cudaMalloc fail");
-  for (int i = 0 ; i < DSIZE; i++){
-    h_i[i] = i;
-    h_o[i] = 0;}
-  cudaMemset(d_o, 0, dszp);
-  cudaCheckErrors("cudaMemset fail");
-  cudaMemcpy(d_i, h_i, dszp, cudaMemcpyHostToDevice);
-  cudaCheckErrors("cudaMemcpy 1 fail");
-  prescan<<<1,DSIZE/2, dszp>>>(d_o, d_i, DSIZE);
-  cudaDeviceSynchronize();
-  cudaCheckErrors("kernel fail");
-  cudaMemcpy(h_o, d_o, dszp, cudaMemcpyDeviceToHost);
-  cudaCheckErrors("cudaMemcpy 2 fail");
-  mytype psum = 0;
+    //allocate memory
+    h_i = (int *)malloc(dszp);
+    h_o = (int *)malloc(dszp);
+    
+    cudaMalloc(&d_i, dszp);
+    cudaMalloc(&d_o, dszp);
+
+    //load sample data for input, and initialize output to 0
+    for (int i = 0 ; i < DSIZE; i++){
+        h_i[i] = i;
+        h_o[i] = 0;
+    }
+
+    //set device output to 0
+    cudaMemset(d_o, 0, dszp);
+
+    //copy sample data from host to device
+    cudaMemcpy(d_i, h_i, dszp, cudaMemcpyHostToDevice);
+    
+    //launch kernel
+    prescan<<<1,DSIZE/2, dszp>>>(d_o, d_i, DSIZE);
+    
+    //copy output from kernel to host memory
+    cudaMemcpy(h_o, d_o, dszp, cudaMemcpyDeviceToHost);
+    
+    //error checking
+    int psum = 0;
   for (int i =1; i < DSIZE; i++){
     psum += h_i[i-1];
     if (psum != h_o[i]) {printf("mismatch at %d, was: %d, should be: %d\n", i, h_o[i], psum); return 1;}
