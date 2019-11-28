@@ -193,18 +193,26 @@ void outputHistogram(int* histogram, int buckets){
     printf("\n");
 }
 
+static unsigned int iDivUp(unsigned int dividend, unsigned int divisor)
+{
+    return ((dividend % divisor) == 0) ?
+           (dividend / divisor) :
+           (dividend / divisor + 1);
+}
+
 int main(int argc, char const *argv[])
 {
     int rSize = atoi(argv[1]); //number of elements in input array
     int numP = atoi(argv[2]); //number of partitions that input will be sorted into
     
-    int* r_h; //input array
+    int* h_data; //input array
 
-    cudaMallocHost((void**)&r_h, sizeof(int)*rSize); //use pinned memory in host so it copies to GPU faster
+    cudaMallocHost((void**)&h_data, sizeof(int)*rSize); //use pinned memory in host so it copies to GPU faster
     
-    nrdataGenerator(r_h, rSize, 0, 1); //randomly generate input data
+    nrdataGenerator(h_data, rSize, 0, 1); //randomly generate input data
     
     /* your code */
+
 
     assert(numP <= rSize && isPowerOfTwo(numP)); //number of partitions must be less than or equal to the input array size and power of 2
 
@@ -216,9 +224,9 @@ int main(int argc, char const *argv[])
     printf("The number of bits in a tag is: %d\n\n",tag);
 
     printf("The contents of the input array are: \n");
-    for(int i = 0; i < rSize; i++){
+    for(int i = 0; i < rSize && i < 10; i++){
         
-        printf("%d\n",r_h[i]);
+        printf("%d\n",h_data[i]);
     }
 
     //allocate memory for host
@@ -231,19 +239,17 @@ int main(int argc, char const *argv[])
     memset(h_histogram, 0, sizeof(int)*numP); //initialize host histogram to zero
 
     //Allocate device memory
-    int* r_d; //input array for device
+    int* d_data; //input array for device
     int* d_histogram; //histogram for device
 
-    cudaMalloc((void**)&r_d, sizeof(int)*rSize); //size of number of inputs
+    cudaMalloc((void**)&d_data, sizeof(int)*rSize); //size of number of inputs
     cudaMalloc((void**)&d_histogram, sizeof(int)*numP); //size of number of partitions
 
     //copy host data to device memory
-    cudaMemcpy(r_d, r_h, sizeof(int)*rSize, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_data, h_data, sizeof(int)*rSize, cudaMemcpyHostToDevice);
     cudaMemcpy(d_histogram, h_histogram, sizeof(int)*numP, cudaMemcpyHostToDevice);
 
-    //define block and grid size
-    int num_threads = 32; //number of threads in a block
-    int num_blocks = (rSize + num_threads - 1)/num_threads;
+    
 
     //start counting time
 	cudaEvent_t start, stop;
@@ -251,12 +257,56 @@ int main(int argc, char const *argv[])
 	cudaEventCreate(&stop);
     cudaEventRecord(start, 0);
     
-    //launch kernel 1 - create histogram
-    histogram<<<num_blocks, num_threads>>>(r_d, d_histogram, tag, rSize);
+    //prepare kernel 1 - creation of the histogram
 
-    //launch kernel 2 - exclusive prefix sum of histogram
+        //define block and grid size for kernel 1
+        int num_threads = 32; //number of threads in a block
+        int num_blocks = (rSize + num_threads - 1)/num_threads;
 
-    //launch kernel 3 - reorder input array
+        histogram<<<num_blocks, num_threads>>>(d_data, d_histogram, tag, rSize);
+
+        //copy data from gpu to host
+        cudaMemcpy(h_histogram, d_histogram, sizeof(int)*numP, cudaMemcpyDeviceToHost);
+
+        //print output
+        outputHistogram(h_histogram, numP);
+
+    //prepare kernel 2 - exclusive prefix sum of histogram
+
+        //define block/grid size and other needed variables
+        int *h_partial_sums, *h_result;
+        int *d_partial_sums;
+        const int n_elements = rSize; //number of input elements
+        int sz = sizeof(int)*n_elements;
+
+        int blockSize = 256;
+        int gridSize = n_elements/blockSize;
+        int nWarps = blockSize/32;
+        int shmem_sz = nWarps * sizeof(int);
+        int n_partialSums = n_elements/blockSize;
+        int partial_sz = n_partialSums*sizeof(int);
+
+        //allocate memory
+        cudaMalloc((void **)&d_partial_sums, partial_sz);
+
+        printf("Scan summation for %d elements, %d partial sums\n",
+            n_elements, n_elements/blockSize);
+
+        int p_blockSize = min(n_partialSums, blockSize);
+        int p_gridSize = iDivUp(n_partialSums, p_blockSize);
+        printf("Partial summing %d elements with %d blocks of size %d\n",
+            n_partialSums, p_gridSize, p_blockSize);
+
+        //multiple kernel calls to accomplish the prefix sum
+        //shfl_scan_test<<<gridSize,blockSize, shmem_sz>>>(d_data, 32, d_partial_sums);
+        //shfl_scan_test<<<p_gridSize,p_blockSize, shmem_sz>>>(d_partial_sums,32);
+        //uniform_add<<<gridSize-1, blockSize>>>(d_data+blockSize, d_partial_sums, n_elements);
+
+        //copy data from gpu to host
+        //cudaMemcpy(h_result, d_data, sz, cudaMemcpyDeviceToHost);
+        //cudaMemcpy(h_partial_sums, d_partial_sums, partial_sz, cudaMemcpyDeviceToHost);
+
+    //prepare kernel 3 - reorder input array
 
     //stop counting time
 	cudaEventRecord(stop, 0);
@@ -264,18 +314,12 @@ int main(int argc, char const *argv[])
 	float elapsedTime;
     cudaEventElapsedTime(&elapsedTime, start, stop);
     
-    //copy data from gpu to host
-    cudaMemcpy(h_histogram, d_histogram, sizeof(int)*numP, cudaMemcpyDeviceToHost);
-
-    //print output
-    outputHistogram(h_histogram, numP);
-
     //report running time
 	printf("******** Total Running Time of Kernel = %0.5f ms *******\n", elapsedTime);
 	cudaEventDestroy(start);
 	cudaEventDestroy(stop);
 
-    cudaFreeHost(r_h);
+    cudaFreeHost(h_data);
     cudaFreeHost(h_histogram);
 
     return 0;
