@@ -2,44 +2,46 @@
 #define DSIZE 1024
 
 
-__global__ void prescan(int *g_odata, int *g_idata, int n)
+__global__ void prescan(int *d_output, int *d_input, int n)
 {
-    extern __shared__ int temp[];  // allocated on invocation
-    int thid = threadIdx.x;
+    extern __shared__ int shmem[];
+    int T = threadIdx.x;
     int offset = 1;
-    temp[2*thid] = g_idata[2*thid]; // load input into shared memory
-    temp[2*thid+1] = g_idata[2*thid+1];
 
-    for (int d = n>>1; d > 0; d >>= 1) // build sum in place up the tree
+    //there are n/2 threads so each thread must load 2 data points
+    shmem[2*T] = d_input[2*T]; // load even indices into shared memory
+    shmem[2*T+1] = d_input[2*T+1]; //load odd indices
+
+    for (int d = n>>1; d > 0; d >>= 1) //upsweep, compute partial sums
     {
         __syncthreads();
-        if (thid < d)
+        if (T < d)
         {
-            int ai = offset*(2*thid+1)-1;
-            int bi = offset*(2*thid+2)-1;
-            temp[bi] += temp[ai];
+            int ai = offset*(2*T+1)-1;
+            int bi = offset*(2*T+2)-1;
+            shmem[bi] += shmem[ai];
         }
     offset *= 2;
     }
 
-    if (thid == 0) { temp[n - 1] = 0; } // clear the last element
-    for (int d = 1; d < n; d *= 2) // traverse down tree & build scan
+    if (T == 0) { shmem[n - 1] = 0; } //last element to 0
+    for (int d = 1; d < n; d *= 2) //downsweep, use partial sums to complete the psum
     {
         offset >>= 1;
         __syncthreads();
 
-        if (thid < d){
-         int ai = offset*(2*thid+1)-1;
-         int bi = offset*(2*thid+2)-1;
-         int t = temp[ai];
-         temp[ai] = temp[bi];
-         temp[bi] += t;
+        if (T < d){
+         int ai = offset*(2*T+1)-1;
+         int bi = offset*(2*T+2)-1;
+         int temp = shmem[ai];
+         shmem[ai] = shmem[bi];
+         shmem[bi] += temp;
         }
     }
 
     __syncthreads();
-    g_odata[2*thid] = temp[2*thid]; // write results to device memory
-    g_odata[2*thid+1] = temp[2*thid+1];
+    d_output[2*T] = shmem[2*T]; //write to global memory in even odd pairs like above
+    d_output[2*T+1] = shmem[2*T+1];
 }
 
 int main(){
