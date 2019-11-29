@@ -65,9 +65,46 @@ __global__ void histogram(int* d_data, int* d_histogram, int tagLength, int size
 
 //define the prefix scan kernel here
 //implement it yourself or borrow the code from CUDA samples
-__global__ void prefixScan(int* d_histogram, int* sum, int size)
+__global__ void prefixscan(int *d_input, int *d_output, int n)
 {
+    extern __shared__ int shmem[];
+    int T = threadIdx.x;
+    int offset = 1;
 
+    //there are n/2 threads so each thread must load 2 data points
+    shmem[2*T] = d_input[2*T]; // load even indices into shared memory
+    shmem[2*T+1] = d_input[2*T+1]; //load odd indices
+
+    for (int d = n>>1; d > 0; d >>= 1) //upsweep, compute partial sums
+    {
+        __syncthreads();
+        if (T < d)
+        {
+            int ai = offset*(2*T+1)-1;
+            int bi = offset*(2*T+2)-1;
+            shmem[bi] += shmem[ai];
+        }
+    offset *= 2;
+    }
+
+    if (T == 0) { shmem[n - 1] = 0; } //last element to 0
+    for (int d = 1; d < n; d *= 2) //downsweep, use partial sums to complete the psum
+    {
+        offset >>= 1;
+        __syncthreads();
+
+        if (T < d){
+         int ai = offset*(2*T+1)-1;
+         int bi = offset*(2*T+2)-1;
+         int temp = shmem[ai];
+         shmem[ai] = shmem[bi];
+         shmem[bi] += temp;
+        }
+    }
+
+    __syncthreads();
+    d_output[2*T] = shmem[2*T]; //write to global memory in even odd pairs like above
+    d_output[2*T+1] = shmem[2*T+1];
 }
 
 //define the reorder kernel here
@@ -93,6 +130,22 @@ void outputHistogram(int* histogram, int buckets){
         printf("\n%02d: ", i);
         printf("%15lld ", histogram[i]);
     }
+}
+
+void output_result(int* histogram, int* psum, int num_buckets){
+	int i; 
+    long long total_cnt = 0;
+    printf("Offset and number of keys per parition:");
+	for(i=0; i< num_buckets; i++) {
+		if(i%5 == 0) /* we print 5 buckets in a row */
+			printf("\n%02d: ", i);
+		printf("%8d: %7lld ", psum[i],histogram[i]);
+		total_cnt += histogram[i];
+	  	/* we also want to make sure the total distance count is correct */
+		if(i == num_buckets - 1)	
+			printf("\n T:%lld \n", total_cnt);
+		else printf("| ");
+	}
 }
 
 int main(int argc, char const *argv[])
@@ -179,23 +232,21 @@ int main(int argc, char const *argv[])
         printf("\n");
 
     //launch kernel 2 - exclusive prefix sum of histogram
-        //temporary CPU solution
 
-        //create the prefix sum array
+        //create the prefix sum array for device and host
         int* d_psum;
         int* h_psum;
         cudaMalloc((void**)&d_psum, sizeof(int)*numP); //a bucket for each partition
         cudaMallocHost((void**)&h_psum, sizeof(int)*numP); 
 
-        //calculate the prefix sum with CPU
-        h_psum[0] = 0; //exclusive
-        for(int i = 1; i < numP; i++){
-            h_psum[i] = h_histogram[i-1] + h_psum[i-1];
-        }
+        prefixscan<<<1, numP/2, numP*sizeof(int)>>>(d_histogram, d_psum, numP);
+
+        //copy data from gpu to host
+        cudaMemcpy(h_psum, d_psum, sizeof(int)*numP, cudaMemcpyDeviceToHost);
 
         //print psum
-        printf("The exclusive prefix sum of the histogram is: \n");
-        for(int i = 0; i < numP && i < 100; i++){
+        printf("First 100 of exclusive prefix: \n");
+        for(int i = 0; i < numP && i < 50; i++){
             printf("%d\n",h_psum[i]);
         }
         printf("\n");
@@ -208,9 +259,6 @@ int main(int argc, char const *argv[])
         //allocate memory
         cudaMalloc((void**)&d_output, sizeof(int)*rSize);
         cudaMallocHost((void**)&h_output, sizeof(int)*rSize);
-        
-        //need to copy host to device memory from second step
-        cudaMemcpy(d_psum, h_psum, sizeof(int)*numP, cudaMemcpyHostToDevice);
 
         Reorder<<<num_blocks, num_threads>>>(r_d, d_output, d_psum, tag, rSize);
 
@@ -218,8 +266,8 @@ int main(int argc, char const *argv[])
         cudaMemcpy(h_output, d_output, sizeof(int)*rSize, cudaMemcpyDeviceToHost);
 
         //print sorted result
-        printf("The sorted output is: \n");
-        for(int i = 0; i < rSize && i < 100; i++){
+        printf("First 50 of the sorted output: \n");
+        for(int i = 0; i < rSize && i < 50; i++){
         printf("%d\n",h_output[i]);
         }
 
@@ -228,7 +276,9 @@ int main(int argc, char const *argv[])
 	cudaEventSynchronize(stop);
 	float elapsedTime;
     cudaEventElapsedTime(&elapsedTime, start, stop);
-    
+
+    //print formatted output
+    output_result(h_histogram, h_psum, numP);
 
     //report running time
 	printf("******** Total Running Time of All Kernels = %0.5f ms *******\n", elapsedTime);
