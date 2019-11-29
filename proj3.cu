@@ -99,6 +99,22 @@ int main(int argc, char const *argv[])
 {
     int rSize = atoi(argv[1]); //number of elements in input array
     int numP = atoi(argv[2]); //number of partitions that input will be sorted into
+
+    //errors for incorrect inputs
+    if(argc > 3){
+		printf("Too many command line arguments, ending program\n");
+		return 0;
+	}
+
+	else if(argc < 3){
+		printf("Too few command line arguments, ending program\n");
+		return 0;
+    }
+    
+    if(rSize <= 0 || numP > 1024 || numP <=0){ //input size must be >= 0 and max # partitions is 1024
+		printf("Invalid command line arguments, ending program\n");
+		return 0;
+	}
     
     int* r_h; //input array
 
@@ -106,7 +122,6 @@ int main(int argc, char const *argv[])
     
     nrdataGenerator(r_h, rSize, 0, 1); //randomly generate input data
     
-    /* your code */
 
     assert(numP <= rSize && isPowerOfTwo(numP)); //number of partitions must be less than or equal to the input array size and power of 2
 
@@ -216,7 +231,7 @@ int main(int argc, char const *argv[])
     
 
     //report running time
-	printf("******** Total Running Time of Kernel = %0.5f ms *******\n", elapsedTime);
+	printf("******** Total Running Time of All Kernels = %0.5f ms *******\n", elapsedTime);
 	cudaEventDestroy(start);
 	cudaEventDestroy(stop);
 
