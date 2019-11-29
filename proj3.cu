@@ -53,14 +53,27 @@ __device__ uint bfe(uint x, uint start, uint nbits)
 //Feel free to change the names of the kernels or define more kernels below if necessary
 
 //define the histogram kernel here
-__global__ void histogram(int* d_data, int* d_histogram, int tagLength, int size)
+__global__ void histogram(int* d_data, int* d_histogram, int tagLength, int size, int num_buckets)
 {
+    extern __shared__ int s_histogram[];
+
+    for(int i = threadIdx.x; i < num_buckets; i += blockDim.x){ //initialize array to 0 in block sized chunks
+		s_histogram[i] = 0;
+	}
+
     int T = blockIdx.x * blockDim.x + threadIdx.x;
 
     if(T < size){
         int h = bfe(d_data[T], 0, tagLength);
-        atomicAdd(&(d_histogram[h]), 1);
+        atomicAdd(&(s_histogram[h]), 1);
     }
+
+    __syncthreads();
+
+	//reduce shared output into global output
+	for(int i = threadIdx.x; i < num_buckets; i += blockDim.x){ //output to global memory in block sized chunks
+		atomicAdd(&(d_histogram[i]), s_histogram[i]);
+	}
 }
 
 //define the prefix scan kernel here
@@ -135,7 +148,7 @@ void outputHistogram(int* histogram, int buckets){
 void output_result(int* histogram, int* psum, int num_buckets){
 	int i; 
     long long total_cnt = 0;
-    printf("Offset and number of keys per parition:");
+    printf("Offset and number of keys per partition:");
 	for(i=0; i< num_buckets; i++) {
 		if(i%5 == 0) /* we print 5 buckets in a row */
 			printf("\n%02d: ", i);
@@ -228,7 +241,7 @@ int main(int argc, char const *argv[])
     cudaEventRecord(start, 0);
     
     //launch kernel 1 - create histogram
-        histogram<<<num_blocks, num_threads>>>(r_d, d_histogram, tag, rSize);
+        histogram<<<num_blocks, num_threads, numP*sizeof(int)>>>(r_d, d_histogram, tag, rSize, numP);
 
         //copy data from gpu to host
         cudaMemcpy(h_histogram, d_histogram, sizeof(int)*numP, cudaMemcpyDeviceToHost);
