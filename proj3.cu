@@ -153,6 +153,9 @@ int main(int argc, char const *argv[])
     int rSize = atoi(argv[1]); //number of elements in input array
     int numP = atoi(argv[2]); //number of partitions that input will be sorted into
 
+    assert(numP <= rSize && isPowerOfTwo(numP)); //number of partitions must be less than or equal to the input array size and power of 2
+    int tag = int(log2(float(numP))); //define number of bits in a tag
+
     //errors for incorrect inputs
     if(argc > 3){
 		printf("Too many command line arguments, ending program\n");
@@ -169,18 +172,40 @@ int main(int argc, char const *argv[])
 		return 0;
 	}
     
-    int* r_h; //input array
+    //Create all needed arrays for all 3 kernels and allocate memory
 
+    int* r_d; //input array for device
+    cudaMalloc((void**)&r_d, sizeof(int)*rSize); //size of number of inputs
+
+    int* r_h;
     cudaMallocHost((void**)&r_h, sizeof(int)*rSize); //use pinned memory in host so it copies to GPU faster
-    
     nrdataGenerator(r_h, rSize, 0, 1); //randomly generate input data
-    
 
-    assert(numP <= rSize && isPowerOfTwo(numP)); //number of partitions must be less than or equal to the input array size and power of 2
+    int* d_histogram; //histogram for algorithm 1
+    cudaMalloc((void**)&d_histogram, sizeof(int)*numP); //size of number of partitions
 
-    int tag = int(log2(float(numP))); //define number of bits in a tag
+    int* h_histogram;
+    cudaMallocHost((void**)&h_histogram, sizeof(int)*numP); //a bucket for each partition
+    memset(h_histogram, 0, sizeof(int)*numP); //initialize host histogram to zero
 
-    
+    int* d_psum; //array to hold the prefix sum of algorithm 2
+    cudaMalloc((void**)&d_psum, sizeof(int)*numP); //a bucket for each partition
+
+    int* h_psum;
+    cudaMallocHost((void**)&h_psum, sizeof(int)*numP);
+
+    int* d_output; //output array for final sorted result
+    cudaMalloc((void**)&d_output, sizeof(int)*rSize);
+
+    int* h_output;
+    cudaMallocHost((void**)&h_output, sizeof(int)*rSize);
+        
+
+    //copy host data to device memory
+    cudaMemcpy(r_d, r_h, sizeof(int)*rSize, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_histogram, h_histogram, sizeof(int)*numP, cudaMemcpyHostToDevice);
+
+
     printf("The number of elements in the input array is: %d\n",rSize);
     printf("The number of partitions is: %d\n",numP);
     printf("The number of bits in a tag is: %d\n\n",tag);
@@ -190,28 +215,9 @@ int main(int argc, char const *argv[])
         
         printf("%d\n",r_h[i]);
     }
+   
 
-    //allocate memory for host
-
-    //(input array already allocated above)
-
-    int* h_histogram; //host histogram
-    cudaMallocHost((void**)&h_histogram, sizeof(int)*numP); //a bucket for each partition
-
-    memset(h_histogram, 0, sizeof(int)*numP); //initialize host histogram to zero
-
-    //Allocate device memory
-    int* r_d; //input array for device
-    int* d_histogram; //histogram for device
-
-    cudaMalloc((void**)&r_d, sizeof(int)*rSize); //size of number of inputs
-    cudaMalloc((void**)&d_histogram, sizeof(int)*numP); //size of number of partitions
-
-    //copy host data to device memory
-    cudaMemcpy(r_d, r_h, sizeof(int)*rSize, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_histogram, h_histogram, sizeof(int)*numP, cudaMemcpyHostToDevice);
-
-    //define block and grid size
+    //define block and grid size for algorithm 1 and 3. 2 only runs with 1 block
     int num_threads = 32; //number of threads in a block
     int num_blocks = (rSize + num_threads - 1)/num_threads;
 
@@ -227,55 +233,36 @@ int main(int argc, char const *argv[])
         //copy data from gpu to host
         cudaMemcpy(h_histogram, d_histogram, sizeof(int)*numP, cudaMemcpyDeviceToHost);
 
-        //print output
-        outputHistogram(h_histogram, numP);
-        printf("\n");
-
     //launch kernel 2 - exclusive prefix sum of histogram
-
-        //create the prefix sum array for device and host
-        int* d_psum;
-        int* h_psum;
-        cudaMalloc((void**)&d_psum, sizeof(int)*numP); //a bucket for each partition
-        cudaMallocHost((void**)&h_psum, sizeof(int)*numP); 
-
         prefixscan<<<1, numP/2, numP*sizeof(int)>>>(d_histogram, d_psum, numP);
 
         //copy data from gpu to host
         cudaMemcpy(h_psum, d_psum, sizeof(int)*numP, cudaMemcpyDeviceToHost);
 
-        //print psum
+        /*//print psum
         printf("First 100 of exclusive prefix: \n");
         for(int i = 0; i < numP && i < 50; i++){
             printf("%d\n",h_psum[i]);
         }
-        printf("\n");
+        printf("\n");*/
 
     //launch kernel 3 - reorder input array
-        //create output arrays for device and host
-        int* d_output;
-        int* h_output;
-
-        //allocate memory
-        cudaMalloc((void**)&d_output, sizeof(int)*rSize);
-        cudaMallocHost((void**)&h_output, sizeof(int)*rSize);
-
         Reorder<<<num_blocks, num_threads>>>(r_d, d_output, d_psum, tag, rSize);
 
         //copy final result from gpu to host
         cudaMemcpy(h_output, d_output, sizeof(int)*rSize, cudaMemcpyDeviceToHost);
-
-        //print sorted result
-        printf("First 50 of the sorted output: \n");
-        for(int i = 0; i < rSize && i < 50; i++){
-        printf("%d\n",h_output[i]);
-        }
 
     //stop counting time
 	cudaEventRecord(stop, 0);
 	cudaEventSynchronize(stop);
 	float elapsedTime;
     cudaEventElapsedTime(&elapsedTime, start, stop);
+
+    //print sorted result
+    printf("First 50 of the sorted output: \n");
+    for(int i = 0; i < rSize && i < 50; i++){
+    printf("%d\n",h_output[i]);
+    }
 
     //print formatted output
     output_result(h_histogram, h_psum, numP);
