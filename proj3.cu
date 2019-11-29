@@ -38,6 +38,16 @@ void nrdataGenerator(int* data, int count, int first, int step)
     }
 }
 
+//sequential data generator
+void sDataGenerator(int* data, int count){
+    assert(data !=NULL);
+    int j = 0;
+    for(int i = count-1; i > 0; --i){
+        data[j] = i;
+        j++;
+    }
+}
+
 /* This function embeds PTX code of CUDA to extract bit field from x. 
    "start" is the starting bit position relative to the LSB. 
    "nbits" is the bit field length.
@@ -53,27 +63,14 @@ __device__ uint bfe(uint x, uint start, uint nbits)
 //Feel free to change the names of the kernels or define more kernels below if necessary
 
 //define the histogram kernel here
-__global__ void histogram(int* d_data, int* d_histogram, int tagLength, int size, int num_buckets)
+__global__ void histogram(int* d_data, int* d_histogram, int tagLength, int size)
 {
-    extern __shared__ int s_histogram[];
-
-    for(int i = threadIdx.x; i < num_buckets; i += blockDim.x){ //initialize array to 0 in block sized chunks
-		s_histogram[i] = 0;
-	}
-
     int T = blockIdx.x * blockDim.x + threadIdx.x;
 
     if(T < size){
         int h = bfe(d_data[T], 0, tagLength);
-        atomicAdd(&(s_histogram[h]), 1);
+        atomicAdd(&(d_histogram[h]), 1);
     }
-
-    __syncthreads();
-
-	//reduce shared output into global output
-	for(int i = threadIdx.x; i < num_buckets; i += blockDim.x){ //output to global memory in block sized chunks
-		atomicAdd(&(d_histogram[i]), s_histogram[i]);
-	}
 }
 
 //define the prefix scan kernel here
@@ -148,7 +145,7 @@ void outputHistogram(int* histogram, int buckets){
 void output_result(int* histogram, int* psum, int num_buckets){
 	int i; 
     long long total_cnt = 0;
-    printf("Offset and number of keys per partition:");
+    printf("Offset and number of keys per parition:");
 	for(i=0; i< num_buckets; i++) {
 		if(i%5 == 0) /* we print 5 buckets in a row */
 			printf("\n%02d: ", i);
@@ -192,7 +189,8 @@ int main(int argc, char const *argv[])
 
     int* r_h;
     cudaMallocHost((void**)&r_h, sizeof(int)*rSize); //use pinned memory in host so it copies to GPU faster
-    nrdataGenerator(r_h, rSize, 0, 1); //randomly generate input data
+    //nrdataGenerator(r_h, rSize, 0, 1); //randomly generate input data
+    sDataGenerator(r_h, rSize);
 
     int* d_histogram; //histogram for algorithm 1
     cudaMalloc((void**)&d_histogram, sizeof(int)*numP); //size of number of partitions
@@ -241,7 +239,7 @@ int main(int argc, char const *argv[])
     cudaEventRecord(start, 0);
     
     //launch kernel 1 - create histogram
-        histogram<<<num_blocks, num_threads, numP*sizeof(int)>>>(r_d, d_histogram, tag, rSize, numP);
+        histogram<<<num_blocks, num_threads>>>(r_d, d_histogram, tag, rSize);
 
         //copy data from gpu to host
         cudaMemcpy(h_histogram, d_histogram, sizeof(int)*numP, cudaMemcpyDeviceToHost);
