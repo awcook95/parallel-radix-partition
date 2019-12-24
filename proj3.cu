@@ -69,12 +69,14 @@ __global__ void histogram(int* d_data, int* d_histogram, int tagLength, int size
 
     for(int i = threadIdx.x; i < num_buckets; i += blockDim.x){ //initialize array to 0 in block sized chunks
 		s_histogram[i] = 0;
-	}
+    }
+    
+    __syncthreads();
 
     int T = blockIdx.x * blockDim.x + threadIdx.x;
 
-    if(T < size){
-        int h = bfe(d_data[T], 0, tagLength);
+    for(int i = T; i < size; i += blockDim.x * gridDim.x){ //grid stride
+        int h = bfe(d_data[i], 0, tagLength);
         atomicAdd(&(s_histogram[h]), 1);
     }
 
@@ -241,7 +243,7 @@ int main(int argc, char const *argv[])
    
 
     //define block and grid size for algorithm 1 and 3. 2 only runs with 1 block
-    int num_threads = 32; //number of threads in a block
+    int num_threads = 1024; //number of threads in a block
     int num_blocks = (rSize + num_threads - 1)/num_threads;
 
     //start counting time
@@ -251,7 +253,7 @@ int main(int argc, char const *argv[])
     cudaEventRecord(start, 0);
     
     //launch kernel 1 - create histogram
-        histogram<<<num_blocks, num_threads, numP*sizeof(int)>>>(r_d, d_histogram, tag, rSize, numP);
+        histogram<<<1024, 256, numP*sizeof(int)>>>(r_d, d_histogram, tag, rSize, numP);
 
         //copy data from gpu to host
         cudaMemcpy(h_histogram, d_histogram, sizeof(int)*numP, cudaMemcpyDeviceToHost);
